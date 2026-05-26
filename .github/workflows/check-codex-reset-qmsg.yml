@@ -1,0 +1,48 @@
+name: Check Codex Reset and Notify QQ
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      force_notify:
+        description: "Send a Qmsg test message even without a no->yes transition"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  check-reset:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check status and notify QQ
+        env:
+          QMSG_KEY: ${{ secrets.QMSG_KEY }}
+          QMSG_QQ: ${{ secrets.QMSG_QQ }}
+          FORCE_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && inputs.force_notify || 'false' }}
+        run: node .github/scripts/check-codex-reset-qmsg.mjs
+
+      - name: Commit updated state
+        run: |
+          if git diff --quiet -- .github/state/codex-reset-state.json; then
+            echo "No state change to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/state/codex-reset-state.json
+          git commit -m "Update Codex reset state"
+          git push
