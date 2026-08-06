@@ -1,4 +1,4 @@
-name: Check Codex Reset and Notify QQ
+name: Check Codex Reset and Notify Email
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       force_notify:
-        description: "Send a Qmsg test message even without a no->yes transition"
+        description: "Send a Chinese email test message"
         required: false
         default: false
         type: boolean
@@ -22,17 +22,13 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Check status and notify QQ
+      - name: Check status and notify email
         env:
-          QMSG_KEY: ${{ secrets.QMSG_KEY }}
-          QMSG_QQ: ${{ secrets.QMSG_QQ }}
+          QQ_MAIL_USER: ${{ secrets.QQ_MAIL_USER }}
+          QQ_MAIL_AUTH_CODE: ${{ secrets.QQ_MAIL_AUTH_CODE }}
+          MAIL_TO: 893387818@qq.com
           FORCE_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && inputs.force_notify || 'false' }}
-        run: node .github/scripts/check-codex-reset-qmsg.mjs
+        run: python3 .github/scripts/check-codex-reset-email.py
 
       - name: Commit updated state
         run: |
