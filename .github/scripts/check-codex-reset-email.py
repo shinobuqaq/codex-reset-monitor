@@ -22,14 +22,16 @@ FORCE_NOTIFY = os.environ.get("FORCE_NOTIFY", "false").lower() == "true"
 
 def read_state() -> dict:
     try:
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
-        return {
-            "lastObservedState": None,
-            "lastNotifiedResetAt": None,
-            "consecutiveFailures": 0,
-            "failureNotificationSent": False,
-        }
+        state = {}
+
+    return {
+        "lastObservedState": state.get("lastObservedState"),
+        "lastNotifiedResetAt": state.get("lastNotifiedResetAt"),
+        "consecutiveFailures": int(state.get("consecutiveFailures", 0)),
+        "failureNotificationSent": bool(state.get("failureNotificationSent", False)),
+    }
 
 
 def write_state(state: dict) -> None:
@@ -49,7 +51,7 @@ def fetch_status(max_attempts: int = 3) -> dict:
                 API_URL,
                 headers={
                     "Cache-Control": "no-cache",
-                    "User-Agent": "codex-reset-monitor/1.0",
+                    "User-Agent": "codex-reset-monitor/2.0",
                     "Accept": "application/json",
                 },
             )
@@ -57,7 +59,13 @@ def fetch_status(max_attempts: int = 3) -> dict:
                 if response.status != 200:
                     raise RuntimeError(f"状态接口返回 HTTP {response.status}")
                 return json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
+        except (
+            urllib.error.URLError,
+            urllib.error.HTTPError,
+            TimeoutError,
+            json.JSONDecodeError,
+            RuntimeError,
+        ) as exc:
             last_error = exc
             print(f"第 {attempt}/{max_attempts} 次状态查询失败：{exc}")
             if attempt < max_attempts:
@@ -97,19 +105,13 @@ def status_details(status: dict) -> tuple[str, str, str, str]:
     return current_state, reset_at, rationale, source_url
 
 
-def build_status_body(status: dict, is_test: bool = False) -> str:
+def build_status_body(status: dict) -> str:
     current_state, reset_at, rationale, source_url = status_details(status)
     checked_at = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
-    intro = (
-        "这是一封手动触发的中文测试邮件，用于确认 GitHub Actions 已能通过 QQ 邮箱正常发送通知。"
-        if is_test
-        else "监控程序检测到 Codex 额度状态可能已从未刷新变为已刷新。"
-    )
-
     return "\n".join(
         [
-            intro,
+            "监控程序检测到 Codex 额度状态可能已从未刷新变为已刷新。",
             "",
             f"当前状态：{current_state}",
             f"额度刷新时间：{reset_at}",
@@ -122,38 +124,72 @@ def build_status_body(status: dict, is_test: bool = False) -> str:
     )
 
 
+def send_test_email() -> None:
+    checked_at = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    send_email(
+        "【Codex额度提醒测试】QQ邮箱通知配置成功",
+        "\n".join(
+            [
+                "这是一封手动触发的中文测试邮件。",
+                "",
+                "如果你能正常收到并阅读这封邮件，说明 GitHub Actions → QQ 邮箱的通知通道工作正常。",
+                f"测试时间：{checked_at}",
+                "",
+                "测试邮件不依赖第三方 Codex 状态网站是否正常。",
+            ]
+        ),
+    )
+
+
+def handle_upstream_failure(state: dict, exc: Exception) -> None:
+    # 上游第三方网站临时故障属于可预期情况，不应把整个 GitHub Actions 标记为失败。
+    # 最多累计到 3；达到 3 后只发送一次中文异常提醒，避免每 10 分钟重复轰炸。
+    if state.get("failureNotificationSent", False):
+        state["consecutiveFailures"] = 3
+        write_state(state)
+        print("第三方状态接口仍不可用；此前已发送过异常提醒，本次不重复发送。")
+        return
+
+    failure_count = min(int(state.get("consecutiveFailures", 0)) + 1, 3)
+    state["consecutiveFailures"] = failure_count
+
+    print(f"第三方状态接口连续失败计数：{failure_count}/3")
+
+    if failure_count >= 3:
+        send_email(
+            "【Codex监控异常】第三方状态网站连续查询失败",
+            "\n".join(
+                [
+                    "Codex 额度监控程序已连续 3 轮无法读取第三方状态网站。",
+                    "",
+                    f"最后错误：{exc}",
+                    f"状态接口：{API_URL}",
+                    "",
+                    "这通常表示第三方网站暂时故障，并不代表你的 Codex 账户或 QQ 邮箱出现问题。",
+                    "后续监控仍会继续运行；网站恢复后，失败计数会自动清零。",
+                ]
+            ),
+        )
+        state["failureNotificationSent"] = True
+
+    write_state(state)
+
+
 def main() -> None:
     state = read_state()
+
+    # 手动测试邮件与第三方状态接口解耦：即使状态网站挂了，也能单独验证邮箱通道。
+    if FORCE_NOTIFY:
+        send_test_email()
 
     try:
         status = fetch_status()
     except Exception as exc:
-        state["consecutiveFailures"] = int(state.get("consecutiveFailures", 0)) + 1
-        failure_count = state["consecutiveFailures"]
+        handle_upstream_failure(state, exc)
+        print("本轮因第三方状态网站不可用而结束，但监控程序本身运行正常。")
+        return
 
-        if failure_count >= 3 and not state.get("failureNotificationSent", False):
-            try:
-                send_email(
-                    "【Codex监控异常】状态接口连续查询失败",
-                    "\n".join(
-                        [
-                            "Codex 额度监控程序连续多次无法读取第三方状态接口。",
-                            "",
-                            f"连续失败次数：{failure_count}",
-                            f"最后错误：{exc}",
-                            f"状态接口：{API_URL}",
-                            "",
-                            "这通常表示第三方网站暂时故障，不代表你的 Codex 账户或 QQ 邮箱有问题。",
-                        ]
-                    ),
-                )
-                state["failureNotificationSent"] = True
-            except Exception as mail_exc:
-                print(f"监控异常邮件发送失败：{mail_exc}")
-
-        write_state(state)
-        raise
-
+    # 上游恢复后清除故障状态。
     state["consecutiveFailures"] = 0
     state["failureNotificationSent"] = False
 
@@ -170,16 +206,10 @@ def main() -> None:
     print(f"当前刷新时间：{current_reset_at}")
     print(f"是否强制发送测试邮件：{FORCE_NOTIFY}")
 
-    if FORCE_NOTIFY:
-        send_email(
-            "【Codex额度提醒测试】QQ邮箱通知配置成功",
-            build_status_body(status, is_test=True),
-        )
-
     if transitioned_to_yes:
         send_email(
             "【Codex额度提醒】Codex额度可能已刷新",
-            build_status_body(status, is_test=False),
+            build_status_body(status),
         )
         state["lastNotifiedResetAt"] = current_reset_at
         print("检测到 no → yes 状态变化，已发送中文邮件提醒。")
