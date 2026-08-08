@@ -1,6 +1,6 @@
 {
-  "lastObservedState": "no",
-  "lastNotifiedResetAt": null,
+  "lastObservedState": "yes",
+  "lastNotifiedResetAt": "1786293117755",
   "consecutiveFailures": 0,
   "failureNotificationSent": false
 }
